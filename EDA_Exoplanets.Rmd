@@ -1,0 +1,264 @@
+---
+title: "Propuesta de Proyecto - Estadistica Descriptiva Multivariada - Exoplanetas NASA"
+author: "Daniel Alvarado - 145310"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 8, fig.height = 6)
+
+source("src/Functions_exo.R")
+```
+
+# Introducción y objetivos
+
+Este documento presenta un EDA sobre el conjunto de datos de Exoplanetas de la NASA Exoplanets Archive. El objetivo principal es explorar las características físicas, orbitales y observacionales de los exoplanetas confirmados, relacionando los métodos de descubrimiento, la masa, el radio, las temperaturas y la estructura de los sistemas planetarios
+
+## Variables seleccionadas para el análisis
+
+Para este análisis se seleccionaron inicialmente 10 variables, (3 cualitativas/categóricas, 1 cuantitativa discreta y 6 cuantitativas continuas)
+
+- discoveryMethod (Cualitativa): Método astrofísico utilizado para descubrir el exoplaneta.
+- ttv_flag (Cualitativa): Presencia de Variaciones en el Tiempo de Tránsito (1 = Sí, 0 = No). (Representa si el exoplaneta se ve afectado por interacciones gravitacionales detectables)
+- soltype (Cualitativa): Tipo de solución de la publicación de datos. (Representa la procedencia del dato: por ejemplo misión kepler, o una publicación confirmada por un equipo de investigación)
+- sy_pnum (Discreta): Número de planetas confirmados en el sistema estelar.
+- sy_snum_fct: Número de estrellas en el sistema
+- st_spectype_class: Clase Espectral de la Estrella Hospedadora
+- disc_facility_top: Instalación/Telescopio de Descubrimiento
+- pl_rade (Continua): Radio planetario expresado en radios terrestres ($R_\oplus$).
+- pl_bmasse (Continua): Masa planetaria expresada en masas terrestres ($M_\oplus$).
+- pl_orbper (Continua): Período orbital en días terrestres.
+- pl_eqt (Continua): Temperatura de equilibrio del planeta en Kelvin ($K$).
+- st_teff (Continua): Temperatura efectiva de la estrella hospedadora en Kelvin ($K$). (temperatura promedio de la superficie de la estrella)
+- sy_dist (Continua): Distancia desde la Tierra al sistema en pársecs ($pc$).
+
+# Carga  y preparación de los datos
+
+Cargamos el conjunto de datos desde el archivo CSV NASA_Exoplanet_Archive_Data.csv y aplicamos las transformaciones necesarias mediante la función prepare_exoplanet_data().
+
+```{r}
+# Carga del dataset
+raw_data <- read.csv("data_descriptiva_multi/NASA_Exoplanet_Archive_Data.csv", stringsAsFactors = FALSE)
+
+# Preparación y factorización de variables
+df <- prepare_exoplanet_data(raw_data)
+
+# Estructura general de las variables seleccionadas
+glimpse(df)
+
+str(raw_data)
+```
+
+# Analisis Univariado
+
+## Variables Cualitativas
+
+### Método de descubrimiento (discoverymethod)
+```{r}
+plot_univariate_cuali(df, "discoverymethod", "Método de Descubrimiento")
+```
+
+### Variaciones en el Tiempo de Tránsito (ttv_flag)
+
+```{r}
+plot_univariate_cuali(df, "ttv_flag", "Flag de Variaciones en el Tiempo de Tránsito (TTV)")
+```
+
+### Tipo de Solución (soltype)
+
+```{r}
+plot_univariate_cuali(df, "soltype", "Tipo de Solución de Datos")
+```
+
+### Número de Planetas en el Sistema (sy_pnum_fct) *
+```{r}
+plot_univariate_cuali(df, "sy_pnum_fct", "Número de Planetas por Sistema Estelar")
+```
+
+### Clase Espectral de la Estrella (st_spectype_class)
+
+```{r}
+plot_univariate_cuali(df, "st_spectype_class", "Clase Espectral Estelar")
+```
+
+### Número de Estrellas en el Sistema (sy_snum_fct)
+
+```{r}
+plot_univariate_cuali(df, "sy_snum_fct", "Número de Estrellas por Sistema")
+```
+
+
+### Instalación / Telescopio de Descubrimiento (disc_facility_top)
+
+```{r}
+plot_univariate_cuali(df, "disc_facility_top", "Instalación de Descubrimiento")
+```
+
+
+## Variables Cuantitativas
+
+```{r}
+variables_cuanti <- list(
+  c("pl_rade", "Radio Planetario (R_E)"),
+  c("pl_bmasse", "Masa Planetaria (M_E)"),
+  c("pl_orbper", "Período Orbital (Días)"),
+  c("pl_eqt", "Temperatura Equilibrio Planetaria (K)"),
+  c("st_teff", "Temperatura Efectiva Estelar (K)"),
+  c("sy_dist", "Distancia al Sistema (pc)")
+)
+
+resumen_cuanti <- map_dfr(variables_cuanti, ~summary_cuanti_table(df, .x[1], .x[2]))
+
+resumen_cuanti %>%
+  kable(caption = "Estadísticos Descriptivos de las Variables Cuantitativas", digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+### Radio Planetario (pl_rade)
+```{r}
+plot_univariate_cuanti(df, "pl_rade", "Radio Planetario", log_scale = TRUE, unit = "R_Earth")
+```
+
+### Masa Planetaria (pl_bmasse)
+```{r}
+plot_univariate_cuanti(df, "pl_bmasse", "Masa Planetaria", log_scale = TRUE, unit = "M_Earth")
+```
+
+### Período Orbital (pl_orbper)
+```{r}
+plot_univariate_cuanti(df, "pl_orbper", "Período Orbital", log_scale = TRUE, unit = "Días")
+```
+
+### Temperatura de Equilibrio Planetaria (pl_eqt)
+```{r}
+plot_univariate_cuanti(df, "pl_eqt", "Temperatura de Equilibrio", log_scale = FALSE, unit = "K")
+```
+
+### Temperatura Efectiva Estelar (st_teff)
+```{r}
+plot_univariate_cuanti(df, "st_teff", "Temperatura Efectiva Estelar", log_scale = FALSE, unit = "K")
+```
+
+### Distancia al Sistema (sy_dist)
+```{r}
+plot_univariate_cuanti(df, "sy_dist", "Distancia al Sistema", log_scale = TRUE, unit = "pc")
+```
+
+# Análisis Bivariado
+
+## Cuali Cuali
+
+### Método de Descubrimiento vs Flag TTV
+Comparación entre los métodos de descubrimiento y la presencia de variaciones en el tiempo de tránsito.
+
+```{r}
+# Filtrar top 4 métodos para visualización más clara
+top_methods <- df %>% count(discoverymethod) %>% top_n(4, n) %>% pull(discoverymethod)
+df_top_methods <- df %>% filter(discoverymethod %in% top_methods)
+
+plot_cuali_cuali(df_top_methods, "discoverymethod", "ttv_flag", "Método de Descubrimiento", "TTV Flag", position = "fill")
+```
+
+### Método de Descubrimiento vs Tipo de Solución (soltype)
+Comparación entre los métodos de descubrimiento y la presencia de variaciones en el tiempo de tránsito.
+
+```{r}
+plot_cuali_cuali(df_top_methods, "discoverymethod", "soltype", "Método de Descubrimiento", "Tipo de Solución", position = "stack")
+```
+
+### Método de Descubrimiento vs Clase Espectral Estelar
+
+```{r}
+plot_cuali_cuali(df_top_methods, "discoverymethod", "st_spectype_class", 
+                 "Método de Descubrimiento", "Clase Espectral", position = "fill")
+```
+
+
+### Método de Descubrimiento vs Número de Estrellas
+```{r}
+plot_cuali_cuali(df_top_methods, "discoverymethod", "sy_snum_fct", 
+                 "Método de Descubrimiento", "Número de Estrellas", position = "stack")
+```
+
+
+
+## Cuali Cuanti
+
+### Tamaño Planetario (pl_rade) según Método de Descubrimiento
+Visualización del sesgo de observación (observational bias) de cada técnica sobre el tamaño de los exoplanetas detectados.
+
+```{r}
+plot_cuali_cuanti(df_top_methods, "discoverymethod", "pl_rade", "Método de Descubrimiento", "Radio Planetario (R_Earth)", log_scale = TRUE)
+```
+
+### Período Orbital (pl_orbper) según Número de Planetas (sy_pnum_fct)
+
+```{r}
+plot_cuali_cuanti(df, "sy_pnum_fct", "pl_orbper", "Número de Planetas en el Sistema", "Período Orbital (Días)", log_scale = TRUE)
+```
+
+## Cuanti Cuanti
+
+### Relación Masa-Radio Planetaria (pl_bmasse vs pl_rade)
+Estudio de la densidad y composición exoplanetaria.
+
+```{r}
+plot_cuanti_cuanti(df, "pl_bmasse", "pl_rade", "Masa Planetaria (M_Earth)", "Radio Planetario (R_Earth)", log_x = TRUE, log_y = TRUE)
+```
+
+### Temperatura Estelar vs Temperatura Planetaria (st_teff vs pl_eqt)
+```{r}
+plot_cuanti_cuanti(df, "st_teff", "pl_eqt", "Temperatura Efectiva Estelar (K)", "Temperatura Equilibrio Planetaria (K)", log_x = FALSE, log_y = FALSE)
+```
+
+# Matriz de Correlación y Matriz de Varianzas y Covarianzas
+
+En esta sección se analiza la asociación lineal y la dispersión conjunta entre las 6 variables cuantitativas del estudio (`pl_rade`, `pl_bmasse`, `pl_orbper`, `pl_eqt`, `st_teff`, `sy_dist`).
+
+## Matriz de Correlación de Pearson
+
+El coeficiente de correlación de Pearson ($r$) mide la fuerza y dirección de la relación lineal entre cada par de variables en una escala acotada entre $-1$ y $1$.
+
+```{r correlacion-pearson, fig.cap="Matriz de Correlación de Pearson"}
+# 1. Gráfico y matriz de correlación en unidades originales
+matriz_cor <- plot_pearson_correlation(df, use_log = FALSE)
+
+# 2. Tabla de coeficientes r de Pearson
+matriz_cor %>% 
+  round(3) %>% 
+  knitr::kable(caption = "Coeficientes de Correlación de Pearson (Escala Original)") %>% 
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+
+## Matriz de Varianzas y Covarianzas
+La matriz de covarianzas ($\Sigma$) sintetiza la variabilidad individual y la variación conjunta de las variables en sus unidades originales.
+
+```{r}
+# 1. Selección de variables cuantitativas
+vars_cuanti <- c("pl_rade", "pl_bmasse", "pl_orbper", "pl_eqt", "st_teff", "sy_dist")
+
+# 2. Extracción de datos numéricos en escala original
+df_cov <- df %>% 
+  select(any_of(vars_cuanti)) %>% 
+  mutate(across(everything(), as.numeric))
+
+# 3. Cálculo de la matriz de varianzas y covarianzas
+matriz_cov <- cov(df_cov, use = "pairwise.complete.obs")
+
+# 4. Presentación tabular de la matriz
+matriz_cov %>% 
+  round(2) %>% 
+  knitr::kable(caption = "Matriz de Varianzas y Covarianzas (Unidades Originales)") %>% 
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+
+
