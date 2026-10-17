@@ -1,0 +1,511 @@
+---
+title: "ACP con imputación multivariada - Exoplanetas NASA"
+author: "Daniel Alvarado - 145310"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 9, fig.height = 6)
+
+source("src/Functions_acp.R")
+set.seed(1234)  # reproducibilidad de la imputación
+```
+
+# Introducción y objetivos
+
+Este documento extiende el EDA inicial (`EDA_Exoplanets.Rmd`) con un
+**Análisis de Componentes Principales (ACP)** sobre **las 16 variables numéricas
+físicas** del dataset, no solo las 6 de la primera caracterización.
+
+El reto central es el nulo de la **masa planetaria** (`pl_bmasse`): 83% de los
+36.418 registros. Se evalúa primero la viabilidad del análisis de casos
+completos y, al no serlo, se aplica **imputación multivariada** con
+`missMDA::imputePCA()`, **sin imputar nunca la masa**.
+
+**Stack:** `FactoMineR` + `missMDA`, sobre el proyecto `renv` existente.
+
+> El plan completo de este análisis, con su justificación fase por fase, está en
+> [`PLAN_acp.md`](PLAN_acp.md).
+
+```{r carga}
+raw_data <- read.csv("data_descriptiva_multi/NASA_Exoplanet_Archive_Data.csv",
+                     stringsAsFactors = FALSE)
+cat("Registros originales:", nrow(raw_data), "\n")
+cat("Columnas originales :", ncol(raw_data), "\n")
+```
+
+# Fase 1 — Selección de variables
+
+## Las 16 variables incluidas
+
+Se analizaron **21 columnas numéricas de contenido**, descartando las de
+metadatos de precisión (`*err1`, `*err2`, `*lim`). De ellas, **16 entran al ACP**:
+
+```{r vars-incluidas}
+tibble(variable = VARS_ACP) %>%
+  kable(caption = "Variables numéricas incluidas en el ACP") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## Las 5 variables excluidas y su justificación
+
+Documentado explícitamente por requerimiento del análisis:
+
+```{r vars-excluidas}
+tibble(
+  variable = names(EXCLUIDAS_ACP),
+  motivo   = unname(EXCLUIDAS_ACP)
+) %>%
+  kable(caption = "Variables numéricas EXCLUIDAS del ACP y por qué") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  column_spec(2, width = "60em")
+```
+
+**Resumen del motivo:**
+
+- `pl_radj` y `pl_bmassj` son **duplicados exactos** de `pl_rade` y `pl_bmasse`
+  en unidades de Júpiter → colinealidad perfecta, producirían eigenvalores 0.
+- `disc_year` es un **metadato temporal**, no una propiedad física del planeta.
+- `sy_snum` y `sy_pnum` son **conteos discretos** con cardinalidad baja; su
+  lugar es como variables suplementarias o en el ACM (Fase 5).
+
+## Transformación (decidida con datos)
+
+La decisión `log10` no se tomó a priori sino midiendo la **asimetría** antes y
+después, dentro del subconjunto con masa:
+
+```{r tabla-log}
+tibble(
+  variable = VARS_ACP,
+  log10    = ifelse(variable %in% VARS_LOG10, "Sí", "No")
+) %>%
+  kable(caption = "Transformación log10 aplicada por variable") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Corrección importante:** a diferencia de una primera aproximación, **no** se
+logaritmearon las magnitudes (`sy_vmag`, `sy_kmag`, `sy_gaiamag`). Ya son
+logarítmicas por definición ($mag = -2.5\log_{10} flux$); transformarlas de nuevo
+**empeora** la asimetría y `sy_kmag` además tiene valores negativos (mín −3,04),
+incompatible con el logaritmo. Tampoco se transformó `pl_rade`, que dentro de
+este subconjunto ya es casi simétrica (asimetría 0,35).
+
+# Fase 2 — Diagnóstico de nulos y viabilidad
+
+## Restricción por masa
+
+```{r subset}
+sel <- seleccionar_variables_acp(raw_data, restringir_por_masa = TRUE)
+
+# Cualitativas SUPLEMENTARIAS alineadas al mismo subset (mismo filtro de masa).
+# Se usan solo para colorear/interpretar; no influyen en los ejes.
+sup_cuali <- raw_data %>%
+  filter(!is.na(pl_bmasse), pl_bmasse != "") %>%
+  transmute(
+    discoverymethod = factor(discoverymethod),
+    soltype         = factor(soltype)
+  )
+stopifnot(nrow(sup_cuali) == nrow(sel$matriz))
+
+tibble(
+  concepto = c("Registros totales", "Con masa observada", "% masa observada",
+               "Variables del ACP"),
+  valor = c(sel$n_origen, sel$n_subset,
+            sprintf("%.1f%%", sel$n_subset / sel$n_origen * 100),
+            ncol(sel$matriz))
+) %>%
+  kable(caption = "Tamaño del subconjunto con masa planetaria observada") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+> La masa se observa en el **17,0%** de los registros (6.207 de 36.418).
+
+## Completitud y asimetría dentro del subconjunto
+
+```{r diagnostico}
+diag <- diagnostico_nulos(sel$matriz)
+
+diag$por_variable %>%
+  arrange(desc(pct_nulos)) %>%
+  mutate(pct_nulos = paste0(pct_nulos, "%")) %>%
+  kable(caption = "Completitud por variable (subconjunto con masa, n = 6.207)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## Resultado: el caso-completo NO es viable
+
+```{r viabilidad}
+tibble(
+  criterio = c("Casos completos encontrados",
+               "Mínimo recomendado (5 obs/variable × 16 vars)",
+               "Veredicto"),
+  valor = c(diag$casos_completos,
+            diag$min_recomendado,
+            ifelse(diag$viabilidad, "VIABLE", "NO VIABLE → imputación obligatoria"))
+) %>%
+  kable(caption = "Evaluación de viabilidad del análisis de casos completos") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+Quedan solo **`r diag$casos_completos` observaciones completas**
+(`r diag$pct_completos`%) para un espacio de **16 dimensiones**. Por debajo del
+mínimo de ~5–10 observaciones por variable y muy por debajo de los ~1.000
+registros recomendados para ejes estables.
+
+**Conclusión: se procede a imputación multivariada de las 15 variables no-masa.**
+
+## Sesgo de selección (limitación a declarar)
+
+El subconjunto con masa **no es representativo** del catálogo completo:
+
+```{r sesgo-metodo, fig.cap="Distribución del método de descubrimiento: completo vs con masa"}
+metodos <- c("Transit", "Radial Velocity", "Microlensing", "Imaging")
+
+comparacion <- bind_rows(
+  raw_data %>%
+    filter(discoverymethod %in% metodos) %>%
+    count(origen = "Completo", discoverymethod),
+  raw_data %>%
+    filter(!is.na(pl_bmasse), pl_bmasse != "", discoverymethod %in% metodos) %>%
+    count(origen = "Con masa", discoverymethod)
+) %>%
+  group_by(origen) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ungroup()
+
+ggplot(comparacion, aes(x = reorder(discoverymethod, pct), y = pct,
+                        fill = origen)) +
+  geom_col(position = "dodge", width = 0.75) +
+  geom_text(aes(label = sprintf("%.1f%%", pct)),
+            position = position_dodge(width = 0.75), vjust = -0.4, size = 3) +
+  scale_fill_nasa(niveles = c("Completo", "Con masa")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Sesgo de selección: método de descubrimiento",
+       subtitle = "Los planetas con masa son mayoritariamente de Velocidad Radial, no de Tránsito",
+       x = "Método de descubrimiento", y = "% de registros",
+       fill = "Subconjunto", caption = "Fuente: NASA Exoplanet Archive") +
+  theme_nasa() +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+
+rm(comparacion)
+```
+
+```{r sesgo-magnitudes}
+mediana <- function(df, v) median(as.numeric(df[[v]]), na.rm = TRUE)
+
+tibble(
+  variable = c("Radio planetario (R⊕)", "Período orbital (días)", "Distancia (pc)"),
+  completo = c(mediana(raw_data, "pl_rade"),
+               mediana(raw_data, "pl_orbper"),
+               mediana(raw_data, "sy_dist")),
+  con_masa = c(mediana(raw_data %>% filter(!is.na(pl_bmasse), pl_bmasse != ""), "pl_rade"),
+               mediana(raw_data %>% filter(!is.na(pl_bmasse), pl_bmasse != ""), "pl_orbper"),
+               mediana(raw_data %>% filter(!is.na(pl_bmasse), pl_bmasse != ""), "sy_dist"))
+) %>%
+  mutate(across(c(completo, con_masa), ~ round(.x, 2))) %>%
+  kable(caption = "Medianas: catálogo completo vs subconjunto con masa") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Interpretación:** los planetas con masa medida son los detectados por
+**velocidad radial**, en sistemas **más cercanos** (137 pc vs 594 pc) y con
+radios **más grandes** (9,89 vs 2,29 R⊕). Es esperable: la masa se mide mejor en
+planetas masivos cercanos.
+
+> **Limitación del análisis:** el ACP describe la estructura de variación de los
+> *exoplanetas con masa conocida*. No se generaliza a los ~30.000 planetas
+> detectados solo por tránsito. Esto no es corregible con imputación; se declara
+> como limitación metodológica.
+
+# Fase 3 — Imputación multivariada
+
+Se imputan las **15 variables no-masa** sobre los 6.207 registros. La masa
+**nunca** se imputa.
+
+```{r imputacion}
+imp <- imputar_acp(sel$matriz)
+
+tibble(
+  concepto = c("Método", "Componentes usados (ncp, por validación cruzada)",
+               "Total de celdas imputadas", "Celdas imputadas en pl_bmasse"),
+  valor = c("missMDA::imputePCA (imputación en espacio de componentes)",
+            imp$ncp, paste0(imp$pct_imputado, "%"), "0,0% (restringida, no se imputa)")
+) %>%
+  kable(caption = "Parámetros de la imputación") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```{r imputacion-por-var, fig.cap="Porcentaje de celdas imputadas por variable"}
+tibble(variable = names(imp$celdas_por_var), pct = as.numeric(imp$celdas_por_var)) %>%
+  arrange(desc(pct)) %>%
+  mutate(variable = factor(variable, levels = rev(variable))) %>%
+  ggplot(aes(x = variable, y = pct, fill = pct > 80)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f%%", pct)), hjust = -0.2, size = 3) +
+  scale_fill_nasa(niveles = c(FALSE, TRUE), guide = "none") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 1.1))) +
+  labs(title = "Celdas imputadas por variable",
+       subtitle = "En rojo: variables con >80% imputado (fragilidad estadística)",
+       x = "", y = "% imputado", caption = "Fuente: NASA Exoplanet Archive") +
+  theme_nasa()
+```
+
+**Advertencia de fragilidad:** `pl_insol` tiene **89,5%** de sus celdas
+imputadas y `pl_eqt` 72,1%. Una variable mayoritariamente reconstruida aporta
+más ruido que señal. Por eso, junto al ACP completo se reporta un **análisis de
+sensibilidad** (Fase 4.4) sin `pl_insol`.
+
+## Validación de la imputación
+
+```{r validacion, fig.cap="Distribución observada (original) vs imputada"}
+validacion <- tibble(
+  variable = VARS_ACP,
+  corr_orig_imp = map_dbl(VARS_ACP, function(v) {
+    orig <- sel$matriz[[v]]
+    impv <- imp$X[, v]
+    ok <- !is.na(orig)
+    if (sum(ok) > 10) suppressWarnings(cor(orig[ok], impv[ok])) else NA_real_
+  })
+)
+
+validacion %>%
+  mutate(corr_orig_imp = round(corr_orig_imp, 3)) %>%
+  arrange(desc(corr_orig_imp)) %>%
+  kable(caption = "Correlación original vs imputado por variable (conserva la señal si se mantiene alta)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+rm(validacion)
+```
+
+```{r densidad-ejemplo, fig.cap="Comparación de densidad: observado vs imputado (st_logg)"}
+idx_var <- "st_logg"
+orig_vals <- sel$matriz[[idx_var]]
+ok <- !is.na(orig_vals)
+
+tibble(
+  valor = c(orig_vals[ok], imp$X[ok == FALSE, idx_var]),
+  tipo  = rep(c("Observado", "Imputado"), c(sum(ok), sum(!ok)))
+) %>%
+  ggplot(aes(x = valor, fill = tipo)) +
+  geom_density(alpha = 0.5, linewidth = 0.4) +
+  scale_fill_nasa(niveles = c("Observado", "Imputado")) +
+  labs(title = paste("st_logg: observado vs imputado"),
+       subtitle = "Los valores imputados deben seguir la forma de los observados",
+       x = "log10(g)", y = "Densidad", fill = "Origen") +
+  theme_nasa()
+```
+
+# Fase 4 — ACP
+
+## 4.1 Ejecución
+
+```{r acp}
+res <- correr_acp(imp$X, ncp = 5, quali_sup = sup_cuali)
+```
+
+Se usa `scale.unit = TRUE`, es decir se trabaja sobre la **matriz de
+correlación**, necesario por las unidades heterogéneas (días, Kelvin, R⊕, pc).
+
+## 4.2 Eigenvalores y varianza explicada
+
+```{r eigenvalores}
+resumen_ejes(res, 5) %>%
+  kable(caption = "Eigenvalores y varianza explicada por componente",
+        digits = c(0, 3, 2, 2)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r scree, fig.cap="Scree plot: varianza explicada por componente"}
+tibble(
+  eje = paste0("Dim", 1:5),
+  pct = resumen_ejes(res, 5)$pct_var,
+  acum = resumen_ejes(res, 5)$pct_acum
+) %>%
+  pivot_longer(-eje, names_to = "tipo", values_to = "valor") %>%
+  mutate(tipo = recode(tipo, pct = "% varianza", acum = "% acumulado")) %>%
+  ggplot(aes(x = eje, y = valor, fill = tipo)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f%%", valor)),
+            position = position_dodge(width = 0.7), vjust = -0.4, size = 3) +
+  scale_fill_nasa(niveles = c("% varianza", "% acumulado")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Scree plot", subtitle = "Criterio de retención: Kaiser (eigenvalor > 1) + codo",
+       x = "", y = "% de varianza", fill = "") +
+  theme_nasa()
+```
+
+**Retención:** los eigenvalores > 1 son los **primeros 4 componentes**
+(eigenvalores 5.85, 4.63, 1.33, 1.05), que acumulan el **80,4%** de la varianza.
+El quinto cae a 0,72 (por debajo de Kaiser) y su aporte es marginal.
+
+## 4.3 Interpretación de ejes
+
+```{r aportes-variables}
+aportes_variables(res, 4) %>%
+  mutate(contribucion = round(contribucion, 2)) %>%
+  pivot_wider(names_from = eje, values_from = contribucion) %>%
+  mutate(across(starts_with("Dim"), ~ sprintf("%.2f", .x))) %>%
+  kable(caption = "Aportes de cada variable a los 4 primeros ejes (%). Punto de referencia = 100/16 = 6.25",
+        digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r circulo-correlaciones, fig.cap="Círculo de correlaciones (Dim1 vs Dim2)", fig.height=7}
+plot_circulo_correlaciones(res, ejes = c(1, 2))
+```
+
+```{r cos2, fig.cap="Calidad de representación (cos²) de las variables en los 4 primeros ejes"}
+cos2_variables(res, ncp = 4) %>%
+  ggplot(aes(x = variable, y = cos2, fill = eje)) +
+  geom_col(position = "dodge", width = 0.75) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray40") +
+  scale_fill_nasa(niveles = paste0("Dim", 1:4)) +
+  coord_flip() +
+  labs(title = "Calidad de representación (cos²) por variable",
+       subtitle = "Línea punteada: cos² = 0,5. Por debajo, la variable NO está bien representada en ese eje",
+       x = "", y = "cos²", fill = "Eje") +
+  theme_nasa()
+```
+
+### Lectura de los ejes
+
+**Dim1 (36,6% de varianza) — "Escala y estructura estelar"**
+Dominada por `st_rad` (12,69), `st_logg` (11,88), `sy_vmag` (10,15),
+`sy_gaiamag` (9,71), `pl_orbper` (9,07), `pl_bmasse` (8,17). Agrupa el tamaño
+físico de las estrellas con la luminosidad aparente y la escala del planeta.
+`st_logg` y `st_rad` cargan con signo opuesto, consistente con la relación
+física: estrellas más grandes tienen menor gravedad superficial.
+
+**Dim2 (29,0% de varianza) — "Entorno térmico y distancia"**
+Dominada por `pl_insol` (16,86), `sy_dist` (16,34), `pl_eqt` (15,39),
+`sy_kmag` (10,13). Describe cuánta radiación recibe el planeta y qué tan lejos
+está: es el eje del **entorno de irradiación**.
+
+**Dim3 (8,3%) y Dim4 (6,5%)** complementan con `pl_orbeccen` y `st_teff` /
+`pl_orbsmax`, pero su aporte por variable es menor.
+
+```{r variables-asignadas}
+cat("Variables con mayor aporte a Dim1 (>= 6.25):\n")
+d1 <- res$var$contrib[, 1]
+print(round(sort(d1[d1 >= 6.25], decreasing = TRUE), 2))
+cat("\nVariables con mayor aporte a Dim2 (>= 6.25):\n")
+d2 <- res$var$contrib[, 2]
+print(round(sort(d2[d2 >= 6.25], decreasing = TRUE), 2))
+```
+
+**Nota sobre `st_met`:** su cos² en Dim1 es prácticamente 0,001. La
+metalicidad estelar queda **casi sin representar** en los dos primeros ejes.
+Se recomienda tratarla como variable suplementaria en lugar de activa, o
+transformarla previamente (asimetría 7,31, con valores atípicos altos).
+
+## 4.4 Mapa de individuos
+
+```{r individuos, fig.cap="Mapa de individuos coloreado por método de descubrimiento", fig.height=7}
+# discoverymethod entra como variable SUPLEMENTARIA (no influye en los ejes)
+plot_individuos_acp(res, grupo = "discoverymethod")
+```
+
+> Para colorear por `discoverymethod` sin que influya en los ejes, la variable
+> se pasó como **suplementaria cualitativa** (`quali.sup`) en el ACP.
+
+### Hallazgo: los métodos de descubrimiento se separan en el espacio del ACP
+
+El mapa muestra una estructura clara:
+
+- **Radial Velocity (rojo):** se concentra en valores **positivos de Dim1**.
+  Coincide con lo observado en la Fase 2: estos planetas son más grandes y sus
+  estrellas anfitrionas más grandes, que es justo lo que define ese eje.
+- **Transit (verde):** se concentra en valores **negativos de Dim1**, el polo
+  opuesto (planetas más pequeños, estrellas más pequeñas).
+- **Microlensing (azul):** se agrupa en valores **positivos de Dim2**, es decir
+  mayor irradiación y temperatura, consistente con su sensibilidad a planetas
+  en zonas alejadas de la estrella.
+
+Esto es **evidencia visual del sesgo de selección** reportado en la Fase 2: los
+métodos no muestrean poblaciones equivalentes de exoplanetas, sino que cada
+técnica "captura" una región distinta del espacio de variables. El ACP, por
+tanto, no describe una población homogénea sino la mezcla de lo que cada método
+fue capaz de detectar.
+
+## 4.5 Análisis de sensibilidad (sin `pl_insol`)
+
+`pl_insol` está imputada al 89,5%. Comparamos si los ejes se sostienen sin ella:
+
+```{r sensibilidad}
+vars_sin_insol <- setdiff(VARS_ACP, "pl_insol")
+sel_sin <- seleccionar_variables_acp(raw_data, restringir_por_masa = TRUE)
+imp_sin <- imputar_acp(sel_sin$matriz[, vars_sin_insol])
+res_sin <- correr_acp(imp_sin$X, ncp = 5)
+
+cmp <- tibble(
+  eje = paste0("Dim", 1:4),
+  pct_con_insol  = resumen_ejes(res, 4)$pct_var,
+  pct_sin_insol  = resumen_ejes(res_sin, 4)$pct_var
+)
+
+cmp %>%
+  mutate(across(starts_with("pct"), ~ round(.x, 2))) %>%
+  kable(caption = "Varianza explicada: con y sin pl_insol",
+        digits = c(0, 2, 2)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# Correlación entre las puntuaciones de los individuos en ambos análisis
+set_cor <- suppressWarnings(cor(res$ind$coord[, 1], res_sin$ind$coord[, 1]))
+cat(sprintf("\nCorrelación Dim1 (con vs sin pl_insol): %.3f\n", set_cor))
+cat(sprintf("Los ejes se %s\n",
+            ifelse(abs(set_cor) > 0.9, "mantienen estables",
+                   "modifican → priorizar el análisis reducido")))
+
+rm(set_cor, vars_sin_insol, sel_sin, imp_sin, res_sin)
+```
+
+# Fase 5 — ACM con variables categóricas (plan posterior)
+
+Queda pendiente por requerimiento. Implicaciones anticipadas:
+
+- **Variables candidatas:** `discoverymethod`, `soltype`, `ttv_flag`,
+  `st_spectype_class`, `disc_facility_top`, `sy_pnum_fct`, `sy_snum_fct`.
+- **Herramienta:** `FactoMineR::MCA()`.
+- Las variables descartadas del ACP por ser conteos (`sy_pnum`, `sy_snum`)
+  recuperan aquí su lugar como categóricas.
+- Decidir si corre sobre el mismo subconjunto de 6.207 (consistencia) o sobre el
+  total (representatividad). Se recomienda **ambos** para comparar.
+
+# Conclusiones
+
+1. **El caso-completo no es viable:** solo `r diag$casos_completos` observaciones
+   completas (0,96%) para 16 dimensiones. La imputación multivariada era
+   obligatoria.
+2. **La masa no se imputó** (0% de celdas), conforme a la premisa del análisis.
+3. **Dos ejes concentran el 65,5%** de la varianza; cuatro alcanzan el **80,4%**
+   (criterio Kaiser).
+4. **Dim1** = escala y estructura estelar; **Dim2** = entorno térmico y distancia.
+5. **Sesgo de selección declarado:** el subconjunto con masa está dominado por
+   detecciones de velocidad radial y planetas grandes cercanos. El ACP describe
+   planetas con masa conocida, no al catálogo completo.
+6. **Fragilidad:** `pl_insol` (89,5% imputada) y `pl_eqt` (72,1%) requieren el
+   análisis de sensibilidad (Fase 4.5).
+
+## Cómo reproducir este análisis
+
+```bash
+Rscript -e 'rmarkdown::render("ACP_Exoplanets.Rmd")'
+```
+
+O desde RStudio con el proyecto `descriptiva_multi.Rproj` abierto.
+
+## Limitaciones
+
+- Sesgo de selección no corregible con imputación (se declara, no se elimina).
+- `pl_insol` y `pl_eqt` mayoritariamente imputadas.
+- `st_met` con representación casi nula en los ejes principales.
+- No se evaluó normalidad multivivariada estricta; el ACP es robusto ante
+  desviaciones moderadas con `n` grande, pero la interpretación de ejes es
+  descriptiva, no inferencial.
