@@ -1,0 +1,402 @@
+---
+title: "Ejercicio extendido - ACP incluyendo los metadatos de precisión"
+author: "Daniel Alvarado - 145310"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 9, fig.height = 6)
+source("src/Functions_acp_extendido.R")
+set.seed(1234)
+```
+
+# Objetivo de este documento
+
+> **Ejercicio de aprendizaje.** No es el análisis principal. Aquí se responde a
+> la pregunta: *¿qué pasaría si en el ACP se incluyeran también las columnas de
+> metadatos de precisión (`*err1`, `*err2`, `*lim`), además de las variables
+> numéricas de contenido?*
+
+El análisis "serio" está en [`ACP_Exoplanets.Rmd`](ACP_Exoplanets.Rmd), que usa
+solo variables de contenido. Este documento existe justamente para mostrar,
+con evidencia numérica, **por qué esas 50 columnas se excluyen**.
+
+```{r carga}
+raw_data <- read.csv("data_descriptiva_multi/NASA_Exoplanet_Archive_Data.csv",
+                     stringsAsFactors = FALSE)
+clases <- detectar_columnas(raw_data)
+
+tibble(
+  tipo = c("Numéricas de contenido", "Metadatos de precisión (err1/err2/lim)",
+           "No numéricas (texto/flags/coordenadas)", "TOTAL"),
+  n = c(length(clases$contenido), length(clases$metadatos),
+         length(clases$no_numericas), ncol(raw_data))
+) %>%
+  kable(caption = "Composición de las columnas del dataset") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+# Fase 1 — Qué son exactamente los metadatos de precisión
+
+Cada variable medida en el archivo va acompañada de hasta tres columnas extra:
+
+| Sufijo | Significado | Ejemplo |
+|---|---|---|
+| `err1` | **Error superior** (incertidumbre por arriba) | `pl_radeerr1` = 0,41 |
+| `err2` | **Error inferior** (incertidumbre por abajo) | `pl_radeerr2` = −0,23 |
+| `lim` | **Flag de límite**: 0 = valor exacto, 1 = cota inferior, −1 = cota superior | `pl_radelim` = 0 |
+
+```{r metadatos-resumen}
+tibble(
+  sufijo = c("err1", "err2", "lim"),
+  n_columnas = c(length(clases$err1), length(clases$err2), length(clases$lim)),
+  `qué representa` = c("Magnitud de la incertidumbre positiva",
+                       "Magnitud de la incertidumbre negativa",
+                       "Clase de límite (flag categórico disfrazado de número)")
+) %>%
+  kable(caption = "Los 50 metadatos de precisión") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Clave conceptual:** estas columnas **no describen al exoplaneta**, describen
+*cuán seguros estamos* de la medida. Una estrella no "tiene" una incertidumbre
+de temperatura como propiedad física: es una propiedad del instrumento y del
+método de observación.
+
+# Fase 2 — Cuatro problemas detectados en los metadatos
+
+## 2.1 Varianza cero y casi cero
+
+```{r diagnostico-varianza}
+mat71 <- preparar_extendido(raw_data, c(clases$contenido, clases$metadatos))
+dv <- diagnostico_varianza(mat71)
+
+dv %>% filter(clase != "ok") %>%
+  mutate(varianza = signif(varianza, 4)) %>%
+  kable(caption = "Variables con varianza cero o casi cero (las 69 restantes están en 'ok')") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```{r grafico-varianza, fig.cap="Varianza por variable (escala logarítmica). En rojo: varianza cero.", fig.height=6}
+dv %>%
+  filter(varianza > 0) %>%
+  ggplot(aes(x = reorder(variable, varianza), y = varianza,
+             fill = clase == "casi cero (inestable)")) +
+  geom_col(width = 0.75) +
+  scale_fill_nasa(niveles = c(FALSE, TRUE), labels = c("varianza normal", "casi cero"),
+                  guide = "none") +
+  scale_y_log10() +
+  coord_flip() +
+  labs(title = "Varianza de cada variable del conjunto extendido",
+       subtitle = "Escala logarítmica. pl_insollim y st_radlim tienen varianza EXACTAMENTE 0 (no aparecen al no poderse graficar en log)",
+       x = "", y = "Varianza (log)") +
+  theme_nasa()
+```
+
+**Consecuencia directa:** `scale.unit = TRUE` en el ACP estandariza dividiendo
+por la desviación estándar. Con varianza 0 eso es una **división entre cero**.
+Estas dos columnas deben excluirse antes de correr cualquier ACP.
+
+> `pl_insollim` y `st_radlim` no tienen varianza porque **todos** sus valores
+> observados en el subset con masa son 0: ningún planeta de esa muestra tiene
+> insolación ni radio estelar reportado como límite.
+
+## 2.2 El nulo del error NO es aleatorio (nulo estructural)
+
+**Si no se midió la variable, tampoco existe su error.** El nulo del error
+depende del nulo del valor, por lo que no es MCAR (Missing Completely At Random).
+
+```{r nulo-estructural}
+nulo_estructural(mat71, c("pl_rade", "pl_orbper", "st_teff", "sy_dist", "pl_eqt")) %>%
+  kable(caption = "¿Coincide el nulo del error con el nulo de su variable base?") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Por qué importa:** imputar `pl_radeerr1` donde no existe `pl_rade` significaría
+fabricar una incertidumbre para una medida que nunca se hizo. No solo es
+estadísticamente dudoso, es **conceptualmente incorrecto**: se le estaría
+atribuyendo precisión a un dato inexistente.
+
+## 2.3 Heterocedasticidad: el error crece con la magnitud
+
+```{r heterocedasticidad}
+het <- heterocedasticidad(raw_data, c("sy_dist", "pl_orbper", "pl_rade",
+                                      "st_rad", "st_mass", "st_teff"))
+het %>%
+  kable(caption = "Correlación log10(valor) vs log10(error superior). r alta = el error escala con la magnitud",
+        digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```{r scatter-hetero, fig.cap="Heterocedasticidad: a mayor distancia, mayor error de medida (r = 0,979)", fig.height=6}
+tibble(
+  dist = suppressWarnings(as.numeric(raw_data$sy_dist)),
+  err  = suppressWarnings(as.numeric(raw_data$sy_disterr1))
+) %>%
+  filter(!is.na(dist), !is.na(err), dist > 0, err > 0) %>%
+  ggplot(aes(x = log10(dist), y = log10(err))) +
+  geom_point(alpha = 0.25, color = nasa_col("primary"), size = 1.4) +
+  geom_smooth(method = "lm", color = nasa_col("secondary"), linewidth = 1,
+              se = FALSE) +
+  labs(title = "Error de medida vs magnitud: distancia al sistema",
+       subtitle = "r = 0,979 en escala logarítmica. El error NO es independiente del valor",
+       x = "log10(distancia [pc])", y = "log10(error de distancia)",
+       caption = "Fuente: NASA Exoplanet Archive") +
+  theme_nasa()
+```
+
+**Consecuencia:** el error de `sy_dist` está correlacionado con `sy_dist` en
+**r = 0,979**. Al meter ambas columnas en el ACP, la primera componente captará
+una dimensión de *"magnitud de la medida"* en vez de una dimensión astrofísica.
+Es un artefacto del instrumento, no de los exoplanetas.
+
+## 2.4 `err2` es negativo y `lim` es un flag discreto
+
+```{r err2-lim}
+tibble(
+  problema = c("`err2` con valores negativos", "`lim` con varianza casi nula"),
+  evidencia = c(
+    sprintf("%d de %d columnas err2 tienen valores negativos → incompatible con log10",
+            sum(map_lgl(clases$err2, ~ any(suppressWarnings(as.numeric(raw_data[[.x]])) < 0, na.rm = TRUE))),
+            length(clases$err2)),
+    sprintf("%.0f%% de los valores de *lim son 0; solo %d valores distintos típicos",
+            mean(map_dbl(clases$lim, ~ mean(suppressWarnings(as.numeric(raw_data[[.x]])) == 0, na.rm = TRUE) * 100)),
+            3)
+  ),
+  `qué implica` = c("Hay que dejarlas en escala original o usar log1p con cuidado",
+                    "Son categóricas ordinales; en el ACP aportan varianza residual artificial")
+) %>%
+  kable(caption = "Problemas de naturaleza de los metadatos") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  column_spec(2, width = "35em")
+```
+
+```{r tabla-lim}
+distribucion_lim(raw_data, clases$lim) %>%
+  head(8) %>%
+  kable(caption = "Distribución de las columnas *lim: predominan los ceros",
+        digits = c(0, 0, 1, 0, 6)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+# Fase 3 — Preparación del conjunto extendido
+
+**Universo del ejercicio: 71 columnas** (21 de contenido + 50 metadatos),
+sobre los mismos **6.207 registros con masa observada** que el ACP principal,
+para que la comparación sea válida.
+
+```{r preparacion}
+vars71 <- c(clases$contenido, clases$metadatos)
+
+# log10 solo donde todas las variables son > 0: contenido positivo y err1
+# (err2 es negativo y *lim son flags → se dejan en escala original)
+vars_log10 <- intersect(
+  c("pl_orbper", "pl_orbsmax", "pl_bmasse", "pl_insol", "st_teff",
+    "st_rad", "st_mass", "sy_dist", clases$err1),
+  vars71
+)
+
+mat71 <- preparar_extendido(raw_data, vars71, vars_log10 = vars_log10)
+
+tibble(
+  concepto = c("Columnas en el ejercicio", "Registros (con masa)",
+               "Variables en log10", "Variables con varianza cero (excluidas)",
+               "Casos completos", "Celdas a imputar"),
+  valor = c(ncol(mat71), nrow(mat71), length(vars_log10),
+            paste(dv$variable[dv$clase == "CERO (rompe ACP)"], collapse = ", "),
+            sum(complete.cases(mat71)),
+            paste0(round(mean(is.na(mat71)) * 100, 1), "%"))
+) %>%
+  kable(caption = "Parámetros del conjunto extendido") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Regla de viabilidad:** 71 variables exigen idealmente > 710 registros
+completos (10 por variable). Hay **165** → el caso-completo sigue inviable,
+igual que en el ACP principal.
+
+# Fase 4 — El ACP extendido
+
+Se excluyen primero las dos columnas de varianza cero y se imputa el resto con
+`missMDA` (nunca con la imputación por media que ofrece FactoMineR por defecto).
+
+```{r acp-extendido}
+ext <- acp_extendido(mat71, ncp_imp = 5, ncp = 10)
+
+tibble(
+  concepto = c("Variables excluidas por varianza cero",
+               "Variables en el ACP", "Componentes de imputación (ncp)",
+               "Celdas imputadas"),
+  valor = c(paste(ext$excluidas_varianza, collapse = ", "),
+            ncol(ext$imputacion$X), ext$imputacion$ncp,
+            paste0(ext$imputacion$pct_imputado, "%"))
+) %>%
+  kable(caption = "Configuración del ACP extendido") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Eigenvalores del ACP extendido
+
+```{r eigenvalores-ext}
+resumen_ejes(ext$resultado, 8) %>%
+  kable(caption = "Eigenvalores del ACP con 69 variables", digits = c(0, 3, 2, 2)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r scree-ext, fig.cap="Scree plot del ACP extendido: la varianza se reparte en muchos ejes"}
+tibble(
+  eje = paste0("Dim", 1:8),
+  pct = resumen_ejes(ext$resultado, 8)$pct_var
+) %>%
+  ggplot(aes(x = eje, y = pct, fill = pct >= 100 / 69)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f%%", pct)), vjust = -0.4, size = 3) +
+  geom_hline(yintercept = 100 / 69, linetype = "dashed",
+             color = nasa_col("secondary"), linewidth = 0.8) +
+  scale_fill_nasa(niveles = c(FALSE, TRUE), labels = c("< 100/69", "≥ 100/69"),
+                  guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Scree plot del ACP extendido (69 variables)",
+       subtitle = sprintf("Línea roja = 100/69 = %.2f%% (aporte promedio bajo Kaiser). Ningún eje llega al 30%%",
+                          100 / 69),
+       x = "", y = "% de varianza", caption = "Fuente: NASA Exoplanet Archive") +
+  theme_nasa()
+```
+
+# Fase 5 — Comparación con el ACP de 16 variables
+
+Para comparar, corremos también el ACP principal sobre las mismas 6.207 filas:
+
+```{r acp-limpio}
+sel <- seleccionar_variables_acp(raw_data, restringir_por_masa = TRUE)
+sup_cuali <- raw_data %>%
+  filter(!is.na(pl_bmasse), pl_bmasse != "") %>%
+  transmute(discoverymethod = factor(discoverymethod), soltype = factor(soltype))
+imp_limpio <- imputar_acp(sel$matriz)
+res_limpio <- correr_acp(imp_limpio$X, ncp = 5, quali_sup = sup_cuali)
+```
+
+## 5.1 La varianza se diluye
+
+```{r comparacion-eigen}
+comparar_eigenvalores(ext$resultado, res_limpio, "extendido_69", "contenido_16", n = 5) %>%
+  kable(caption = "% de varianza explicada por eje: ACP extendido vs ACP de contenido",
+        digits = c(0, 2, 2, 2, 2)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```{r grafico-comparacion, fig.cap="Varianza acumulada: con 69 variables hace falta mucho más dimensionalidad"}
+bind_rows(
+  tibble(eje = 1:5, acum = cumsum(resumen_ejes(ext$resultado, 5)$pct_var),
+         conjunto = "Extendido (69 vars)"),
+  tibble(eje = 1:5, acum = cumsum(resumen_ejes(res_limpio, 5)$pct_var),
+         conjunto = "Contenido (16 vars)")
+) %>%
+  ggplot(aes(x = eje, y = acum, color = conjunto, group = conjunto)) +
+  geom_line(linewidth = 1.1) + geom_point(size = 3) +
+  scale_color_nasa(n = 2) +
+  scale_x_continuous(breaks = 1:5) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), limits = c(0, 100)) +
+  labs(title = "Varianza acumulada comparada",
+       subtitle = "Al añadir metadatos, cada eje explica menos y se necesitan más dimensiones",
+       x = "Componente principal", y = "Varianza acumulada", color = "",
+       caption = "Fuente: NASA Exoplanet Archive") +
+  theme_nasa()
+```
+
+**Lectura:** el ACP de 16 variables alcanza el **80,4%** en 4 componentes; el
+extendido apenas llega al **61,7%** en 4 y al 66,7% en 5. Añadir 53 columnas al
+ACP de contenido **diluye** la varianza sin aportar estructura nueva interpretable.
+
+## 5.2 Los ejes pierden interpretación
+
+El punto de referencia para juzgar si una variable "define" un eje es
+$100/p$ (donde $p$ es el número de variables):
+
+| ACP | Variables ($p$) | Umbral Kaiser $100/p$ | Mayor aporte en Dim1 |
+|---|---|---|---|
+| Contenido | 16 | 6,25% | `st_rad` = **12,69%** (2× el umbral) |
+| Extendido | 69 | 1,45% | `sy_dist` = **2,96%** |
+
+```{r comparacion-aportes, fig.cap="Aportes a Dim1: en el ACP de contenido una variable domina; en el extendido todas quedan diluidas"}
+apr_ext  <- aportes_variables(ext$resultado, ncp = 1) %>% filter(eje == "Dim1") %>% rename(extendido = contribucion)
+apr_limp <- aportes_variables(res_limpio, ncp = 1) %>% filter(eje == "Dim1") %>% rename(contenido = contribucion)
+
+bind_rows(
+  apr_ext %>% top_n(10, extendido) %>% mutate(conjunto = "Extendido (69)"),
+  apr_limp %>% mutate(conjunto = "Contenido (16)")
+) %>%
+  mutate(variable = fct_reorder(variable, ifelse(conjunto == "Contenido (16)", contenido, extendido))) %>%
+  ggplot(aes(x = variable, y = ifelse(conjunto == "Contenido (16)", contenido, extendido),
+             fill = conjunto)) +
+  geom_col(position = "dodge", width = 0.75) +
+  geom_hline(yintercept = 100 / 69, linetype = "dashed", color = "gray40") +
+  geom_hline(yintercept = 100 / 16, linetype = "dashed", color = nasa_col("secondary")) +
+  scale_fill_nasa(niveles = c("Extendido (69)", "Contenido (16)")) +
+  coord_flip() +
+  labs(title = "Aporte de cada variable a la primera componente",
+       subtitle = "Línea gris = umbral del ACP extendido (1,45%); línea roja = umbral del ACP de contenido (6,25%)",
+       x = "", y = "% de aporte a Dim1", fill = "") +
+  theme_nasa()
+```
+
+**Conclusión de la comparación:** en el ACP de contenido, `st_rad` aporta el
+12,69% — muy por encima de su umbral de 6,25% — y por eso el eje es
+interpretable como "escala estelar". En el extendido, **ninguna variable supera
+el 3%**, así que ningún eje tiene un dominante claro: los ejes se vuelven
+**combinaciones difusas difíciles de nombrar**.
+
+## 5.3 Los ejes capturan artefactos de medición
+
+En el ACP extendido, `sy_dist` y las tres magnitudes copan los primeros lugares
+de Dim1. Pero `sy_disterr1` está correlacionado con `sy_dist` en r = 0,979, y
+las magnitudes son directamente medidas fotométricas. El eje pasa a describir
+*"qué tan bien medimos y qué tan lejos está el objeto"* en lugar de una
+propiedad física del sistema planetario.
+
+# Lecciones aprendidas
+
+1. **Los metadatos de precisión no son variables del fenómeno.** Describen al
+   instrumento, no al exoplaneta. Incluirlos desplaza la interpretación del ACP
+   hacia la calidad de la medición.
+
+2. **El nulo del error es estructural** (91–99% de coincidencia con el nulo del
+   valor): imputarlo fabricaría incertidumbres para medidas que nunca existieron.
+
+3. **`err2` es negativo** (18/18 columnas) → incompatible con `log10`; requiere
+   tratarlo aparte o usar el valor absoluto, lo que rompe la simetría del error.
+
+4. **`*lim` son flags discretos** (96–100% ceros) → varianza casi nula; dos
+   columnas tienen varianza **exactamente 0** y dividen entre cero en
+   `scale.unit = TRUE`.
+
+5. **Heterocedasticidad**: el error escala con la magnitud (r = 0,979 en
+   `sy_dist`), lo que introduce una dimensión espuria de "escala de medida".
+
+6. **Dilución de varianza**: Dim1 cae de 36,6% a 25,8%; 4 ejes pasan de explicar
+   80,4% a 61,7%. Más variables ≠ más información útil.
+
+7. **Pérdida de interpretabilidad**: el umbral $100/p$ baja de 6,25% a 1,45% y
+   ninguna variable supera el 3% en Dim1 → ningún eje tiene dominante claro.
+
+8. **FactoMineR imputa por media por defecto** si recibe `NA`, y avisa. Para
+   imputación multivariada legítima hay que usar `missMDA` antes de llamar a
+   `PCA()`.
+
+> **Veredicto:** este ejercicio confirma numéricamente por qué
+> [`ACP_Exoplanets.Rmd`](ACP_Exoplanets.Rmd) excluye las 50 columnas de
+> precisión. No es una decisión de comodidad: es requisito para que el ACP
+> describa a los exoplanetas y no a los telescopios.
+
+## Cómo reproducir
+
+```bash
+Rscript -e 'rmarkdown::render("ACP_extendido_metadatos.Rmd")'
+```

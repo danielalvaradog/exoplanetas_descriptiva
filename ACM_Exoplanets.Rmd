@@ -1,0 +1,506 @@
+---
+title: "ACM con variables categóricas - Exoplanetas NASA"
+author: "Daniel Alvarado - 145310"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 9, fig.height = 6)
+
+source("src/Functions_acm.R")   # a su vez carga Functions_acp.R (tema NASA) + FactoMineR
+set.seed(1234)
+```
+
+# Introducción y objetivos
+
+Este documento ejecuta la **Fase 5 anunciada en el ACP** (`ACP_Exoplanets.Rmd`):
+el **Análisis de Correspondencias Múltiples (ACM)** sobre las variables
+**categóricas** del catálogo de exoplanetas.
+
+El principio es el mismo que se usó para las numéricas: **ninguna exclusión se
+decide por intuición**. Cada candidata pasa primero por un diagnóstico con
+datos (nulos, cardinalidad, nivel dominante) y solo después se decide si entra
+como activa, con qué tratamiento, o si queda excluida con la justificación
+exacta.
+
+**Decisiones de alcance confirmadas antes de codear:**
+
+1. El ACM corre sobre el **mismo subconjunto con masa (6.207 filas)** que el
+   ACP, para que los dos análisis describan la misma población y `pl_bmassprov`
+   (que solo existe en filas con masa) sea usable.
+2. Los nulos categóricos se tratan como nivel propio **"Sin dato"** (no se
+   descartan filas).
+3. Los niveles con frecuencia menor a 100 se agrupan en **"Otros"**.
+4. `default_flag` se **excluye**: es marcador de fila, no propiedad del planeta.
+
+El catálogo completo (36.418 filas) se descarta como población: contiene
+varias filas de parámetros **por el mismo planeta** (es la estructura que
+detecta `default_flag`), así que en un ACM el mismo planeta contaría tantas
+veces como referencias tenga, distorsionando la tabla de perfiles.
+
+```{r carga}
+raw_data <- read.csv("data_descriptiva_multi/NASA_Exoplanet_Archive_Data.csv",
+                     stringsAsFactors = FALSE)
+cat("Registros originales:", nrow(raw_data), "\n")
+cat("Columnas originales :", ncol(raw_data), "\n")
+```
+
+# Fase 1 — Diagnóstico del universo categórico
+
+## La estructura que condiciona todo: varias filas por planeta
+
+Antes de mirar variables, hay que mirar la unidad de análisis. El catálogo
+**no** tiene una fila por planeta:
+
+```{r estructura-catalogo}
+d1 <- raw_data[raw_data$default_flag == 1, ]
+tibble(
+  concepto = c("Filas totales del catálogo",
+               "Planetas únicos (pl_name distinto)",
+               "Filas marcadas con default_flag = 1",
+               "¿Exactamente una fila default por planeta?"),
+  valor = c(nrow(raw_data),
+            n_distinct(raw_data$pl_name),
+            nrow(d1),
+            if (n_distinct(d1$pl_name) == nrow(d1)) "Sí, sin duplicados" else "No")
+) %>%
+  kable(caption = "Estructura de la unidad de análisis del catálogo") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+`default_flag = 1` identifica **exactamente una fila por planeta** (las 5.757
+filas default tienen 5.757 nombres distintos). El resto son conjuntos de
+parámetros alternativos de otras referencias. Esta es la razón formal para no
+correr el ACM sobre las 36.418 filas y para trabajar sobre el subconjunto con
+masa, donde la unidad es "registro de parámetros con masa" — la misma unidad
+que ya usa el ACP.
+
+## Diagnóstico de las 18 candidatas
+
+Todas las columnas que no son numéricas de contenido ni metadatos de precisión
+son candidatas: 18 en total.
+
+```{r diagnostico-global}
+diag_global <- diagnostico_categoricas(raw_data)
+diag_global %>%
+  select(variable, pct_nulos, n_niveles, nivel_dominante, pct_dominante, problemas) %>%
+  mutate(pct_nulos = paste0(pct_nulos, "%"), pct_dominante = paste0(pct_dominante, "%")) %>%
+  kable(caption = "Diagnóstico de las 18 candidatas categóricas (catálogo completo)",
+        col.names = c("Variable", "% nulos", "Niveles", "Dominante", "% dom.", "Veredicto automático")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(6, width = "32em")
+```
+
+Este diagnóstico global sirve para conocer el catálogo, **pero las decisiones
+se toman con el diagnóstico sobre el subconjunto**, porque es ahí donde van a
+vivir las variables activas. Una variable puede ser viable en el catálogo y
+degenerar en el subconjunto (o al revés).
+
+```{r diagnostico-subset}
+bm <- suppressWarnings(as.numeric(raw_data$pl_bmasse))
+sub_masa <- raw_data[!is.na(bm) & raw_data$pl_bmasse != "", ]
+stopifnot(nrow(sub_masa) == 6207)
+
+diag_subset <- diagnostico_categoricas(sub_masa)
+diag_subset %>%
+  select(variable, pct_nulos, n_niveles, nivel_dominante, pct_dominante, problemas) %>%
+  mutate(pct_nulos = paste0(pct_nulos, "%"), pct_dominante = paste0(pct_dominante, "%")) %>%
+  kable(caption = "Diagnóstico sobre el subconjunto con masa (6.207 filas) — este es el que decide",
+        col.names = c("Variable", "% nulos", "Niveles", "Dominante", "% dom.", "Veredicto automático")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(6, width = "32em")
+```
+
+# Fase 2 — Verificación de no-viabilidad (exclusiones con evidencia)
+
+De las 18 candidatas, **5 entran como activas** y **13 quedan excluidas**. Cada
+exclusión tiene evidencia del diagnóstico, no una opinión:
+
+```{r excluidas}
+# La evidencia se construye DESDE el diagnóstico, no hardcodeada.
+excluidas_info <- tibble(
+  variable = c("pl_name", "hostname", "pl_refname", "st_refname", "sy_refname",
+               "rastr", "decstr", "rowupdate", "pl_pubdate", "releasedate",
+               "st_spectype", "soltype", "default_flag"),
+  grupo = c(rep("Llave de identidad o referencia", 5),
+            rep("Coordenada o fecha continua", 5),
+            "Nulos estructurales", "Constante en el alcance", "Marcador de fila"),
+  nota = c("el nivel más frecuente apenas se repite",
+           "el nivel más frecuente apenas se repite",
+           "URLs de la bibliografía", "URLs de la bibliografía",
+           "URL; el dominante apunta a una sola referencia ADS",
+           "valores de arco 'hh mm ss.s'", "valores de arco '±dd mm ss.s'",
+           "metadato de mantenimiento de la fila",
+           "formato YYYY-MM (año-mes), del subgrupo de publicación",
+           "metadato de mantenimiento de la fila",
+           "275 tipos espectrales distintos",
+           "los candidatos Kepler/TESS no tienen masa, solo queda 1 nivel",
+           "2 niveles (0/1); identifica la fila default, no la física")
+)
+
+diag_global %>%
+  select(variable, n_niveles, nivel_dominante, pct_dominante, pct_nulos) %>%
+  left_join(excluidas_info, by = "variable") %>%
+  arrange(grupo, variable) %>%
+  transmute(
+    variable,
+    grupo,
+    pct_nulos = paste0(pct_nulos, "%"),
+    n_niveles,
+    evidencia = sprintf("%s niveles; dominante '%s' (%s); %s",
+                        n_niveles, str_trunc(nivel_dominante, 30), 
+                        paste0(pct_dominante, "%"), nota)
+  ) %>%
+  select(-n_niveles) %>%
+  kable(caption = "Variables categóricas EXCLUIDAS del ACM, con evidencia del diagnóstico global",
+        col.names = c("Variable", "Grupo", "% nulos", "Evidencia")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  column_spec(4, width = "55em")
+```
+
+## Los dos casos que merecen explicación propia
+
+**`soltype` — excluida pese a haberse planeado activa.** La decisión previa era
+colapsar sus 9 niveles (7 son variantes del mismo release de Kepler) a 4. La
+verificación sobre el subconjunto mostró algo más severo: **los candidatos
+Kepler y TESS no tienen masa medida** (no están confirmados), así que dentro de
+las 6.207 filas `soltype` es **100% 'Published Confirmed'**. Una variable
+constante no aporta inercia: el ACM no tiene nada que extraer de ella con este
+alcance. La función `colapsar_soltype()` queda en el módulo por si se corre el
+escenario alternativo sobre el catálogo completo por planeta, donde sí habría
+variación.
+
+**`st_spectype` — excluida por nulos, igual que el caso-completo del ACP.** En
+el subconjunto con masa el 82,3% de las filas no tiene tipo espectral. Convertir
+el nulo en nivel "Sin dato" haría que la categoría dominante del ACM fuese,
+literalmente, "no sé" — la variable describiría la ausencia de espectroscopía,
+no la estrella. Es el mismo criterio por el que el ACP descartó el análisis de
+casos completos (solo 349 filas completas): aquí la cobertura es 17,7%.
+
+# Fase 3 — Preparación de las variables activas
+
+Las 5 activas y su tratamiento:
+
+```{r prep-activas}
+prep <- preparar_categoricas(raw_data, restringir_por_masa = TRUE)
+tabla <- prep$tabla
+registro <- prep$registro
+
+tibble(
+  variable        = names(tabla),
+  niveles         = sapply(tabla, nlevels),
+  tratamiento = c(
+    "Niveles con n < 100 agrupados en 'Otros' (los 6 métodos raros)",
+    "Instalaciones con n < 100 agrupadas en 'Otras instalaciones' (quedan 14 de las 70)",
+    "Msin(i)/sin(i) con n = 26 agrupado en 'Otros'; nunca tiene nulos en este subset",
+    "[m/H] con n = 1 agrupado en 'Otros'; el 37% de los nulos se vuelven nivel 'Sin dato'",
+    "Binaria recodificada Sí / No"
+  )
+) %>%
+  kable(caption = "Variables activas del ACM y su tratamiento") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  column_spec(3, width = "50em")
+```
+
+**Detalle importante de `pl_bmassprov`:** su nulo no es aleatorio, es
+**estructural** — solo existe en filas con masa (la coincidencia con
+`pl_bmasse` es exacta: 6.207 = 6.207). Dentro de este subconjunto la variable
+está completa al 100%, por eso sí es viable aquí (y no lo sería en el catálogo
+completo, donde tiene 83% de nulos).
+
+```{r niveles-activas}
+dist_niveles <- map_dfr(names(tabla), function(v) {
+  tab <- table(tabla[[v]])
+  tibble(variable = v,
+         nivel = names(tab),
+         n = as.integer(tab),
+         pct = round(n / sum(tab) * 100, 1))
+})
+
+dist_niveles %>%
+  mutate(etiqueta = paste0(nivel, " — ", n, " (", pct, "%)")) %>%
+  group_by(variable) %>%
+  summarise(distribucion = paste(etiqueta, collapse = "<br>")) %>%
+  kable(caption = "Distribución de niveles de las 5 activas dentro del subconjunto") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  column_spec(2, width = "65em")
+```
+
+```{r dimensiones}
+tibble(
+  concepto = c("Filas (n)", "Variables activas (J)", "Categorías totales (m)",
+               "Inercia total cruda = m/J - 1"),
+  valor = c(registro$n_subset, registro$J_activas, registro$m_categorias,
+            round(registro$m_categorias / registro$J_activas - 1, 2))
+) %>%
+  kable(caption = "Dimensiones del ACM") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+# Fase 4 — Ejecución del ACM
+
+## 4.1 Ejecución y validación de la inercia total
+
+La inercia total de un ACM vale $m/J - 1$; se valida contra lo que calcula
+`FactoMineR`:
+
+```{r inercia-total}
+res <- correr_acm(tabla)   # espectro completo
+
+inercia_teorica <- registro$m_categorias / registro$J_activas - 1
+inercia_real    <- sum(res$eig[, 1])
+stopifnot(abs(inercia_teorica - inercia_real) < 0.01)
+
+cat("Inercia total teórica (m/J - 1):", round(inercia_teorica, 3), "\n")
+cat("Inercia total de FactoMineR    :", round(inercia_real, 3), "\n")
+```
+
+Coinciden: el ACM se construyó sobre las 29 categorías esperadas y ninguna se
+descartó por dentro.
+
+## 4.2 Eigenvalores: crudos y ajustados
+
+En un ACM la inercia está **diluida**: el nivel "de azar" de un eigenvalor crudo
+es $1/J$ (= `r round(1/registro$J_activas, 2)` con J =
+`r registro$J_activas`), no 1 como en el ACP. Para decidir retención se usa la
+inercia ajustada de Nenadić y Greenacre (2007):
+
+$$\lambda^* = \left(\frac{J}{J-1}\left(\lambda - \frac{1}{J}\right)\right)^2$$
+
+Un eje con $\lambda < 1/J$ tiene ajustada 0: es ruido por debajo del azar.
+
+```{r eigenvalores}
+ejes_resumen <- resumen_ejes_mca(res, registro$J_activas)
+ejes_resumen %>%
+  select(eje, eigen_crudo, ajustada, pct_ajustada, pct_acum, conservar) %>%
+  mutate(across(c(eigen_crudo, ajustada), ~round(.x, 4)),
+         across(c(pct_ajustada, pct_acum), ~paste0(.x, "%"))) %>%
+  kable(caption = "Eigenvalores crudos y ajustados (todo el espectro, 24 ejes)",
+        col.names = c("Eje", "λ crudo", "λ* ajustada", "% inercia ajustada", "% acumulado", "¿Conserva inercia real?")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  column_spec(6, width = "16em")
+```
+
+```{r scree, fig.width=9, fig.height=5.5}
+plot_scree_mca(head(ejes_resumen, 10), registro$J_activas)
+```
+
+**Decisión de retención: 2 ejes.** Dim1 concentra
+`r ejes_resumen$pct_ajustada[1]`% de la inercia ajustada y Dim2 añade
+`r ejes_resumen$pct_ajustada[2]`% (acumulado
+`r ejes_resumen$pct_acum[2]`%). Desde Dim3 hay un codo brutal: el tercer eje
+aporta solo `r ejes_resumen$pct_ajustada[3]`%, más de un orden de magnitud por
+debajo del segundo. Ojo: pese al codo, el eigenvalor crudo del Dim3
+(`r ejes_resumen$eigen_crudo[3]`) todavía supera el nivel de azar 1/J, es decir
+conserva inercia real (su ajustada es
+`r ejes_resumen$ajustada[3]`); la retención de 2 ejes es criterio de codo, no un
+descarte por umbral.
+
+## 4.3 Interpretación del Dim1
+
+```{r aportes-dim1}
+aporte <- tabla_categorias(res, tabla, ncp = 2, medida = "contrib")
+
+aporte %>%
+  filter(eje == "Dim1") %>%
+  arrange(desc(valor)) %>%
+  head(10) %>%
+  select(nivel, variable, valor) %>%
+  mutate(valor = paste0(round(valor, 1), "%")) %>%
+  kable(caption = "Top 10 categorías por aporte al Dim1") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r mapa-categorias, fig.width=10, fig.height=7}
+plot_categorias_acm(res, tabla)
+```
+
+**Lectura del Dim1: el eje de cómo se obtuvo la masa.** El contraste principal
+no está entre planetas sino entre **estrategias de medición**:
+
+- **Lado positivo:** el mundo de los tránsitos espaciales — `Kepler`, `K2`,
+  `TESS`, `HATNet`, `SuperWASP`, `CoRoT` junto con `Transit`, con masa
+  determinada como `Mass` (física, vía modelos) y con `Sí` en TTV. Son las
+  filas donde la masa existe aunque el método principal no la mida
+  directamente.
+- **Lado negativo:** el mundo de la velocidad radial terrestre —
+  `Radial Velocity` con `Msini` (masa mínima, depende de sin i), medidas en
+  `W. M. Keck`, `Lick`, `La Silla`, `Anglo-Australian Telescope`,
+  `Haute-Provence`, `Multiple Observatories`, y metalicidad **observada** con
+  escala `[Fe/H]` / `[M/H]`.
+
+La coherencia física es fuerte: los programas de RV seleccionan estrellas
+metálicas ricas (el sesgo bien documentado de que la metalicidad alta favorece
+la formación y detección de gigantes por RV), y su masa es `Msini` porque sin
+el tránsito no se conoce toda la inclinación orbital. En cambio, los
+tránsitos espaciales dan inclinación y por eso la masa aparece como `Mass` —
+además el nivel `Sí` de `ttv_flag` cae exactamente en ese lado: las
+variaciones de tiempo de tránsito solo existen en sistemas con tránsito.
+
+```{r mapa-individuos, fig.width=10, fig.height=6.5}
+plot_individuos_acm(res, grupo = tabla$discoverymethod)
+```
+
+El mapa de individuos confirma la separación sin solapamientos raros: las filas
+RV (amarillo) viven en el lado izquierdo/negativo, las de tránsito (púrpura) en
+el derecho/positivo, y las de microlente (rosa) quedan en la parte superior,
+que es justo lo que explica el Dim2.
+
+## 4.4 Interpretación del Dim2
+
+```{r aportes-dim2}
+aporte %>%
+  filter(eje == "Dim2") %>%
+  arrange(desc(valor)) %>%
+  head(10) %>%
+  select(nivel, variable, valor) %>%
+  mutate(valor = paste0(round(valor, 1), "%")) %>%
+  kable(caption = "Top 10 categorías por aporte al Dim2") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+**Lectura del Dim2: técnicas de masa indirectas vs técnicas de tránsito.** El
+cuadrante superior derecho agrupa las categorías de **microlente**
+(`KMTNet`, `OGLE`, `Microlensing`): planetas masivos detectados por modelado
+gravitacional, mayormente fríos y lejanos, sumado al `Imaging`. Contra la
+parte inferior quedan los relevamientos de tránsito con alto volumen. Cerca
+del origen, donde el ACM no los separa, quedan las categorías `Otros` —
+precisamente las de mínimo contenido.
+
+## 4.5 Aportes por variable (agregando categorías)
+
+```{r aportes-variables}
+aporte %>%
+  group_by(eje, variable) %>%
+  summarise(aporte = sum(valor), .groups = "drop") %>%
+  pivot_wider(names_from = eje, values_from = aporte) %>%
+  mutate(Dim1 = paste0(round(Dim1, 1), "%"),
+         Dim2 = paste0(round(Dim2, 1), "%")) %>%
+  select(variable, Dim1, Dim2) %>%
+  kable(caption = "Aporte por variable activa (suma de sus categorías)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+`discoverymethod` y `disc_facility` dominan los dos ejes (son las variables con
+más niveles y mayor capacidad discriminatoria). `pl_bmassprov` es la tercera en
+importancia — y con sentido: describe *cómo se midió* la masa, que es
+exactamente el eje Dim1. `st_metratio` y `ttv_flag` aportan de forma secundaria
+pero no trivial.
+
+# Fase 5 — Verificaciones y limitaciones
+
+## La etiqueta "Sin dato" pesa, y así debe reportarse
+
+```{r verificacion-sin-dato}
+tab_met <- table(tabla$st_metratio)
+tab_met_df <- as.data.frame(tab_met, responseName = "n")
+names(tab_met_df) <- c("nivel", "n")
+tab_met_df %>%
+  mutate(pct = paste0(round(n / sum(n) * 100, 1), "%")) %>%
+  kable(caption = "st_metratio: el nivel 'Sin dato' es ~1 de cada 3 filas") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+`st_metratio_Sin dato` tiene una posición diferenciada en el Dim1 (lado de los
+tránsitos espaciales): los planetas de tránsito sin masa espectroscópica no
+tienen metalicidad publicada. La lectura correcta es que el Dim1 también
+distingue **qué subpoblación tiene estudio espectroscópico de la estrella**,
+no solo la técnica de la masa. Esto es exactamente lo que el análisis debe
+reportar: la estructura incluye la presencia de datos, no solo la física.
+
+## Niveles con n pequeño: posición inestable
+
+Dos niveles agrupados tienen muestras mínimas y su posición en el mapa es
+referencial, no concluyente:
+
+```{r limitacion-n}
+dist_niveles %>%
+  filter(n <= 30) %>%
+  select(variable, nivel, n, pct) %>%
+  mutate(pct = paste0(pct, "%")) %>%
+  kable(caption = "Niveles con muestra mínima: leer con cautela") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+`st_metratio_Otros` agrupa al único caso `[m/H]` (n = 1) y
+`pl_bmassprov_Otros` a los 26 casos `Msin(i)/sin(i)`. En un ACM un nivel con n
+pequeño puede alejarse del origen por pura rareza del perfil. Para el análisis
+principal no cambian nada (sus aportes son bajos), pero en la interpretación no
+se apoyan conclusiones en ellos.
+
+## Unicidad de planeta en el subconjunto
+
+Como en el ACP, la unidad es el **registro de parámetros**, no el planeta:
+
+```{r unicidad}
+tibble(
+  concepto = c("Filas con masa (subset del ACM)",
+               "Planetas únicos dentro del subset",
+               "Filas por planeta (mediana / máximo)"),
+  valor = c(registro$n_subset,
+            n_distinct(sub_masa$pl_name),
+            paste0(median(table(sub_masa$pl_name)), " / ", max(table(sub_masa$pl_name))))
+) %>%
+  kable(caption = "Unidad de análisis del ACM: registro con masa, no planeta") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+Un planeta con varias mediciones de masa publicadas participa varias veces.
+Es la misma limitación declarada en el ACP (sesgo de selección hacia planetas
+con masa) y aquí mantiene la comparabilidad entre los dos análisis.
+
+# Conclusiones
+
+1. **De 18 candidatas categóricas, 5 son activas viables** después de
+   verificación con datos: `discoverymethod`, `disc_facility`, `pl_bmassprov`,
+   `st_metratio`, `ttv_flag`. Las 13 excluidas se justifican una por una con
+   evidencia del diagnóstico (identidad, continuidad disfrazada, nulos
+   estructurales, constancia en el alcance, marcador de fila).
+2. **El caso notable es `soltype`**: diseñada como activa (con colapso de sus
+   9 niveles), la verificación mostró que dentro del subconjunto con masa es
+   100% 'Published Confirmed' — varianza cero. Se excluye con evidencia y la
+   función de colapso queda disponible para otro alcance.
+3. **Dos ejes explican el 59,2% de la inercia ajustada**, con un codo claro en
+   el tercero (3,8%).
+4. **Dim1 es el eje de la técnica de medición de masa**: velocidad radial
+   terrestre (`Msini`, telescopios de calibre grande, estrellas con metalicidad
+   publicada) contra tránsito espacial (`Mass`, Kepler/K2/TESS, planetas con
+   TTV). **Dim2 separa microlente e imagen** de las técnicas de tránsito.
+5. El ACM y el ACP cuentan la misma historia por caminos distintos: la
+   estructura de la población de exoplanetas con masa está primeramente
+   marcada por **cómo se obtienen sus parámetros**, y eso arrastra los sesgos
+   de detección (metallicidad en RV, inclinación orbital solo medible con
+   tránsito).
+
+## Cómo reproducir este análisis
+
+```{r reproducir, eval=FALSE}
+rmarkdown::render("ACM_Exoplanets.Rmd")
+# La lógica vive en src/Functions_acm.R:
+#   diagnostico_categoricas()  - diagnostico de viabilidad (18 candidatas)
+#   preparar_categoricas()     - activas + tratamiento de niveles
+#   correr_acm()               - FactoMineR::MCA con espectro completo
+#   resumen_ejes_mca()         - eigenvalores crudos y ajustados (Greenacre)
+#   tabla_categorias()         - aportes/cos2 con variable correcta
+```
+
+## Limitaciones
+
+- La inercia de un ACM está estructuralmente diluida; los porcentajes no son
+  comparables con los de un ACP (por eso se usa la métrica ajustada).
+- El nivel "Sin dato" de `st_metratio` (~1 de cada 3 filas) participa de la
+  geometría: parte del Dim1 refleja la ausencia del dato además de la física.
+- Los niveles con n ≤ 30 (listados arriba) tienen posición referencial.
+- La unidad sigue siendo el registro de parámetros; un planeta con varias
+  mediciones pesa varias veces (limitación compartida con el ACP).
+
+```{r sessioninfo, echo=FALSE}
+sessionInfo()
+```
