@@ -77,7 +77,7 @@ diagnostico_categoricas <- function(df, vars = CAT_CANDIDATAS,
 # helper: % del total que aporta el nivel mas frecuente
 niv_dominante_pct <- function(tab, n_total) round(as.numeric(tab[1]) / n_total * 100, 1)
 
-# helper:_detecta cadenas que en realidad son fechas o coordenadas continuas.
+# helper: detecta cadenas que en realidad son fechas o coordenadas continuas.
 # Una binaria (0/1) o con pocos niveles distintos es categorica legitima;
 # solo se marca "continua" si hay MUCHOS valores numéricos distintos.
 # OJO: ninguna regex con \d funciona en el motor TRE de R sin perl=TRUE
@@ -143,7 +143,7 @@ preparar_categoricas <- function(df, restringir_por_masa = TRUE) {
   # este modulo para el escenario alternativo de catálogo completo.
   out <- data.frame(
     discoverymethod = agrupar_raros(d$discoverymethod),
-    disc_facility   = agrupar_raros(d$disc_facility, etiqueta = "Otras facilitys"),
+    disc_facility   = agrupar_raros(d$disc_facility, etiqueta = "Otras instalaciones"),
     pl_bmassprov    = agrupar_raros(factor(
       ifelse(is.na(d$pl_bmassprov) | d$pl_bmassprov == "",
              "Sin dato", as.character(d$pl_bmassprov)))),
@@ -168,8 +168,9 @@ preparar_categoricas <- function(df, restringir_por_masa = TRUE) {
 # ------------------------------------------------------------------------------
 
 #' Corre el ACM con FactoMineR sobre la tabla de factores.
-#' Por defecto usa el espectro COMPLETO (ncp = m - J) para que los porcentajes
-#' de inercia ajustada no se calculen sobre una base truncada.
+#' Por defecto pide un espectro casi completo (ncp = m - J; FactoMineR lo
+#' trunca al rango valido) para que los % de inercia ajustada no se calculen
+#' sobre una base reducida.
 correr_acm <- function(tabla, ncp = NULL) {
   J <- ncol(tabla)
   m <- sum(sapply(tabla, function(x) nlevels(x)))
@@ -183,9 +184,9 @@ correr_acm <- function(tabla, ncp = NULL) {
 }
 
 #' Resumen de ejes: eigenvalores CRUDOS + ajustados (Nenadic-Greenacre).
-#' En MCA la inercia total = m/J - 1, y el umbral "promedio" es 1/J por eje.
-#' Los ajustados ( J/(J-1) * (lambda - 1/J) ) son la medida estandar para
-#' decidir retencion: rendimiento negativo = ruido bajo la azarosidad.
+#' En MCA la inercia total = m/J - 1, y el nivel "de azar" es 1/J por eje.
+#' La ajustada lambda* = (J/(J-1) * (lambda - 1/J))^2 es la medida estandar
+#' para decidir retencion: si vale 0, el eje es ruido por debajo del azar.
 #'
 #' @param res objeto MCA de FactoMineR
 #' @param J numero de variables activas
@@ -206,7 +207,7 @@ resumen_ejes_mca <- function(res, J) {
 }
 
 #' Asigna a cada etiqueta de categoria de FactoMineR su VARIABLE de origen,
-#' WALKING los bloques en orden: FactoMineR lista las categorias consecutivas
+#' recorriendo los bloques en orden: FactoMineR lista las categorias consecutivas
 #' por variable y en el orden definido de la tabla (los droplevels respetan
 #' el orden de los niveles). No existe un parseo fiable de la etiqueta: el
 #' prefijo "var_nivel" se aplica solo a ALGUNAS variables (verificado).
@@ -282,7 +283,7 @@ plot_aportes_categorias <- function(tcp, eje = "Dim1", n = 12) {
     geom_hline(yintercept = 0, color = "gray50") +
     coord_flip() +
     labs(title = paste0("Aporte de categorias a ", eje),
-         subtitle = "Los niveles con mayor influencia definen que estructura el eje",
+         subtitle = "Los niveles con mayor influencia definen qué estructura el eje",
          x = "", y = "% de aporte al eje", fill = "Variable activa") +
     theme_nasa() +
     theme(legend.position = "bottom")

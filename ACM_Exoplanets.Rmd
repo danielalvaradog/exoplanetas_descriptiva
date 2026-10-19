@@ -198,9 +198,9 @@ tibble(
   niveles         = sapply(tabla, nlevels),
   tratamiento = c(
     "Niveles con n < 100 agrupados en 'Otros' (los 6 métodos raros)",
-    "instalaciones con n < 100 en 'Otras facilitys' (14 instalaciones quedaron)",
+    "Instalaciones con n < 100 agrupadas en 'Otras instalaciones' (quedan 14 de las 70)",
     "Msin(i)/sin(i) con n = 26 agrupado en 'Otros'; nunca tiene nulos en este subset",
-    "[m/H] con n = 1 agrupado en 'Otros'; los 37% de nulos se vuelven nivel 'Sin dato'",
+    "[m/H] con n = 1 agrupado en 'Otros'; el 37% de los nulos se vuelven nivel 'Sin dato'",
     "Binaria recodificada Sí / No"
   )
 ) %>%
@@ -296,9 +296,12 @@ plot_scree_mca(head(ejes_resumen, 10), registro$J_activas)
 `r ejes_resumen$pct_ajustada[1]`% de la inercia ajustada y Dim2 añade
 `r ejes_resumen$pct_ajustada[2]`% (acumulado
 `r ejes_resumen$pct_acum[2]`%). Desde Dim3 hay un codo brutal: el tercer eje
-solo aporta `r ejes_resumen$pct_ajustada[3]`%, y su eigenvalor crudo
-(`r ejes_resumen$eigen_crudo[3]`) ya baja de la referencia de "contenido
-informativo medio". La caída Dim2 → Dim3 es de más de un orden de magnitud.
+aporta solo `r ejes_resumen$pct_ajustada[3]`%, más de un orden de magnitud por
+debajo del segundo. Ojo: pese al codo, el eigenvalor crudo del Dim3
+(`r ejes_resumen$eigen_crudo[3]`) todavía supera el nivel de azar 1/J, es decir
+conserva inercia real (su ajustada es
+`r ejes_resumen$ajustada[3]`); la retención de 2 ejes es criterio de codo, no un
+descarte por umbral.
 
 ## 4.3 Interpretación del Dim1
 
@@ -347,8 +350,8 @@ plot_individuos_acm(res, grupo = tabla$discoverymethod)
 
 El mapa de individuos confirma la separación sin solapamientos raros: las filas
 RV (amarillo) viven en el lado izquierdo/negativo, las de tránsito (púrpura) en
-el derecho/positivo, y el microlente (rosa) se yergue en la parte superior, que
-es justo lo que explica el Dim2.
+el derecho/positivo, y las de microlente (rosa) quedan en la parte superior,
+que es justo lo que explica el Dim2.
 
 ## 4.4 Interpretación del Dim2
 
@@ -366,10 +369,10 @@ aporte %>%
 **Lectura del Dim2: técnicas de masa indirectas vs técnicas de tránsito.** El
 cuadrante superior derecho agrupa las categorías de **microlente**
 (`KMTNet`, `OGLE`, `Microlensing`): planetas masivos detectados por modelado
-gravitacional, mayormente fríos y lejanos, además del `Imaging`. Contra la
+gravitacional, mayormente fríos y lejanos, sumado al `Imaging`. Contra la
 parte inferior quedan los relevamientos de tránsito con alto volumen. Cerca
-del origen, donde el ACM no los separa, los `Otros` — precisamente las
-categorías de mínimo contenido.
+del origen, donde el ACM no los separa, quedan las categorías `Otros` —
+precisamente las de mínimo contenido.
 
 ## 4.5 Aportes por variable (agregando categorías)
 
