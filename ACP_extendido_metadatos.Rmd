@@ -154,7 +154,7 @@ tibble(
 
 **Consecuencia:** el error de `sy_dist` está correlacionado con `sy_dist` en
 **r = 0,979**. Al meter ambas columnas en el ACP, la primera componente captará
-una dimensión de *"magnitud de la medida"* en vez de una dimensión astrophísica.
+una dimensión de *"magnitud de la medida"* en vez de una dimensión astrofísica.
 Es un artefacto del instrumento, no de los exoplanetas.
 
 ## 2.4 `err2` es negativo y `lim` es un flag discreto
@@ -312,8 +312,8 @@ bind_rows(
 ```
 
 **Lectura:** el ACP de 16 variables alcanza el **80,4%** en 4 componentes; el
-extendido apenas llega al **61,7%** en 4 y al 66,7% en 5. Añadir 53 columnas de
-metadatos **diluye** la varianza sin aportar estructura nueva interpretable.
+extendido apenas llega al **61,7%** en 4 y al 66,7% en 5. Añadir 53 columnas al
+ACP de contenido **diluye** la varianza sin aportar estructura nueva interpretable.
 
 ## 5.2 Los ejes pierden interpretación
 

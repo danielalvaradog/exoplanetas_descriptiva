@@ -91,8 +91,8 @@ tibble(
 ```
 
 **Corrección importante:** a diferencia de una primera aproximación, **no** se
-logaritmearon las magnitudes (`sy_vmag`, `sy_kmag`, `sy_gaiamag`). Ya son
-logarítmicas por definición ($mag = -2.5\log_{10} flux$); transformarlas de nuevo
+aplicó log10 a las magnitudes (`sy_vmag`, `sy_kmag`, `sy_gaiamag`). Ya son
+logarítmicas por definición ($mag = -2.5\ \log_{10}(flux)$); transformarlas de nuevo
 **empeora** la asimetría y `sy_kmag` además tiene valores negativos (mín −3,04),
 incompatible con el logaritmo. Tampoco se transformó `pl_rade`, que dentro de
 este subconjunto ya es casi simétrica (asimetría 0,35).
@@ -261,7 +261,7 @@ tibble(variable = names(imp$celdas_por_var), pct = as.numeric(imp$celdas_por_var
 **Advertencia de fragilidad:** `pl_insol` tiene **89,5%** de sus celdas
 imputadas y `pl_eqt` 72,1%. Una variable mayoritariamente reconstruida aporta
 más ruido que señal. Por eso, junto al ACP completo se reporta un **análisis de
-sensibilidad** (Fase 4.4) sin `pl_insol`.
+sensibilidad** (Fase 4.5) sin `pl_insol`.
 
 ## Validación de la imputación
 
@@ -341,8 +341,8 @@ tibble(
   theme_nasa()
 ```
 
-**Retención:** los eigenvalores > 1 son los **primeros 4 componentes**
-(eigenvalores 5.85, 4.63, 1.33, 1.05), que acumulan el **80,4%** de la varianza.
+**Retención:** los eigenvalores > 1 corresponden a los **primeros 4 componentes**
+(5.85, 4.63, 1.33, 1.05), que acumulan el **80,4%** de la varianza.
 El quinto cae a 0,72 (por debajo de Kaiser) y su aporte es marginal.
 
 ## 4.3 Interpretación de ejes
@@ -481,8 +481,8 @@ Queda pendiente por requerimiento. Implicaciones anticipadas:
 # Conclusiones
 
 1. **El caso-completo no es viable:** solo `r diag$casos_completos` observaciones
-   completas (0,96%) para 16 dimensiones. La imputación multivariada era
-   obligatoria.
+   completas (`r diag$pct_completos`% del subconjunto con masa) para 16
+   dimensiones. La imputación multivariada era obligatoria.
 2. **La masa no se imputó** (0% de celdas), conforme a la premisa del análisis.
 3. **Dos ejes concentran el 65,5%** de la varianza; cuatro alcanzan el **80,4%**
    (criterio Kaiser).
@@ -506,6 +506,6 @@ O desde RStudio con el proyecto `descriptiva_multi.Rproj` abierto.
 - Sesgo de selección no corregible con imputación (se declara, no se elimina).
 - `pl_insol` y `pl_eqt` mayoritariamente imputadas.
 - `st_met` con representación casi nula en los ejes principales.
-- No se evaluó normalidad multivivariada estricta; el ACP es robusto ante
+- No se evaluó normalidad multivariada de forma estricta; el ACP es robusto ante
   desviaciones moderadas con `n` grande, pero la interpretación de ejes es
   descriptiva, no inferencial.
